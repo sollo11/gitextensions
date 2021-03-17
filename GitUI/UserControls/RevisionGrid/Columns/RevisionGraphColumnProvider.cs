@@ -1,15 +1,16 @@
-﻿using System;
-using System.Diagnostics.CodeAnalysis;
+using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 using GitCommands;
 using GitExtUtils.GitUI;
 using GitUI.UserControls.RevisionGrid.Graph;
 using GitUIPluginInterfaces;
-using Microsoft;
+using JetBrains.Annotations;
 
 namespace GitUI.UserControls.RevisionGrid.Columns
 {
@@ -17,24 +18,22 @@ namespace GitUI.UserControls.RevisionGrid.Columns
     {
         private const int MaxLanes = 40;
 
-        private static readonly int LaneLineWidth = DpiUtil.Scale(2);
-        private static readonly int LaneWidth = DpiUtil.Scale(16);
         private static readonly int NodeDimension = DpiUtil.Scale(10);
+        private static readonly int LaneWidth = DpiUtil.Scale(16);
+        private static readonly int LaneLineWidth = DpiUtil.Scale(2);
 
-        private readonly LaneInfoProvider _laneInfoProvider;
         private readonly RevisionGridControl _grid;
         private readonly RevisionGraph _revisionGraph;
-        private readonly GraphCache _graphCache = new();
+        private readonly GraphCache _graphCache = new GraphCache();
 
         private RevisionGraphDrawStyleEnum _revisionGraphDrawStyleCache;
         private RevisionGraphDrawStyleEnum _revisionGraphDrawStyle;
 
-        public RevisionGraphColumnProvider(RevisionGridControl grid, RevisionGraph revisionGraph, IGitRevisionSummaryBuilder gitRevisionSummaryBuilder)
+        public RevisionGraphColumnProvider(RevisionGridControl grid, RevisionGraph revisionGraph)
             : base("Graph")
         {
             _grid = grid;
             _revisionGraph = revisionGraph;
-            _laneInfoProvider = new LaneInfoProvider(new LaneNodeLocator(_revisionGraph), gitRevisionSummaryBuilder);
 
             // TODO is it worth creating a lighter-weight column type?
 
@@ -106,7 +105,7 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                     }
                 }
 
-                int newRows = _graphCache.Count < _graphCache.Capacity
+                var newRows = _graphCache.Count < _graphCache.Capacity
                     ? (rowIndex - _graphCache.Count) + 1
                     : 0;
 
@@ -143,13 +142,17 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                     return true;
                 }
 
-                DrawVisibleGraph();
+                if (!DrawVisibleGraph())
+                {
+                    return false;
+                }
+
                 CreateRectangle();
                 return true;
 
                 void CreateRectangle()
                 {
-                    Rectangle cellRect = new(
+                    var cellRect = new Rectangle(
                         0,
                         ((_graphCache.HeadRow + rowIndex - _graphCache.Head) % _graphCache.Capacity) * rowHeight,
                         width,
@@ -162,22 +165,17 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                         GraphicsUnit.Pixel);
                 }
 
-                void DrawVisibleGraph()
+                bool DrawVisibleGraph()
                 {
-                    // Getting RevisionGraphDrawStyle results in call to AppSettings. This is not very cheap, cache.
-                    _revisionGraphDrawStyleCache = RevisionGraphDrawStyle;
-
-                    for (int index = start; index < end; index++)
+                    for (var index = start; index < end; index++)
                     {
                         // Get the x,y value of the current item's upper left in the cache
-                        int curCacheRow = (_graphCache.HeadRow + index - _graphCache.Head) % _graphCache.Capacity;
-                        int x = ColumnLeftMargin;
-                        int y = curCacheRow * rowHeight;
+                        var curCacheRow = (_graphCache.HeadRow + index - _graphCache.Head) % _graphCache.Capacity;
+                        var x = ColumnLeftMargin;
+                        var y = curCacheRow * rowHeight;
 
-                        Validates.NotNull(_graphCache.GraphBitmapGraphics);
-
-                        Rectangle laneRect = new(0, y, width, rowHeight);
-                        Region oldClip = _graphCache.GraphBitmapGraphics.Clip;
+                        var laneRect = new Rectangle(0, y, width, rowHeight);
+                        var oldClip = _graphCache.GraphBitmapGraphics.Clip;
 
                         if (index > 0 && (index == start || curCacheRow == 0))
                         {
@@ -198,51 +196,52 @@ namespace GitUI.UserControls.RevisionGrid.Columns
 
                         _graphCache.GraphBitmapGraphics.RenderingOrigin = new Point(x, y);
 
-                        DrawItem(_graphCache.GraphBitmapGraphics, index);
+                        var success = DrawItem(_graphCache.GraphBitmapGraphics, index);
 
                         _graphCache.GraphBitmapGraphics.Clip = oldClip;
+
+                        if (!success)
+                        {
+                            _graphCache.Reset();
+                            return false;
+                        }
                     }
+
+                    return true;
                 }
 
-                void DrawItem(Graphics g, int index)
+                bool DrawItem(Graphics g, int index)
                 {
-                    SmoothingMode oldSmoothingMode = g.SmoothingMode;
+                    // Clip to the area we're drawing in, but draw 1 pixel past so
+                    // that the top/bottom of the line segment's anti-aliasing isn't
+                    // visible in the final rendering.
+                    int top = g.RenderingOrigin.Y; //// + rowHeight;
+                    var laneRect = new Rectangle(0, top, width, rowHeight);
                     Region oldClip = g.Clip;
-
-                    int top = g.RenderingOrigin.Y;
-                    Rectangle laneRect = new(0, top, width, rowHeight);
-                    Region newClip = new(laneRect);
+                    var newClip = new Region(laneRect);
                     newClip.Intersect(oldClip);
                     g.Clip = newClip;
                     g.Clear(Color.Transparent);
 
-                    DrawItem();
-
-                    // Restore graphics options
-                    g.Clip = oldClip;
-                    g.SmoothingMode = oldSmoothingMode;
-
-                    return;
-
-                    void DrawItem()
+                    if (index > _revisionGraph.GetCachedCount())
                     {
-                        if (index > _revisionGraph.GetCachedCount())
-                        {
-                            return;
-                        }
+                        return true;
+                    }
 
-                        IRevisionGraphRow? currentRow = _revisionGraph.GetSegmentsForRow(index);
-                        if (currentRow is null)
-                        {
-                            return;
-                        }
+                    // Getting RevisionGraphDrawStyle results in call to AppSettings. This is not very cheap, cache.
+                    _revisionGraphDrawStyleCache = RevisionGraphDrawStyle;
 
-                        IRevisionGraphRow? previousRow = _revisionGraph.GetSegmentsForRow(Math.Max(0, index - 1));
-                        IRevisionGraphRow? nextRow = _revisionGraph.GetSegmentsForRow(index + 1);
+                    var oldSmoothingMode = g.SmoothingMode;
 
+                    var previousRow = _revisionGraph.GetSegmentsForRow(Math.Max(0, index - 1));
+                    var currentRow = _revisionGraph.GetSegmentsForRow(index);
+                    var nextRow = _revisionGraph.GetSegmentsForRow(index + 1);
+
+                    if (currentRow != null)
+                    {
+                        int startY = top - rowHeight + (rowHeight / 2);
                         int centerY = top + (rowHeight / 2);
-                        int startY = centerY - rowHeight;
-                        int endY = centerY + rowHeight;
+                        int endY = top + rowHeight + (rowHeight / 2);
 
                         foreach (RevisionGraphSegment revisionGraphRevision in currentRow.Segments.Reverse().OrderBy(s => s.Child.IsRelative))
                         {
@@ -279,10 +278,8 @@ namespace GitUI.UserControls.RevisionGrid.Columns
 
                             Brush brush;
 
-                            if (!revisionGraphRevision.Parent.Children.IsEmpty
-                                && !revisionGraphRevision.Parent.Children.Pop().IsEmpty)
+                            if (revisionGraphRevision.Parent.Children.Count > 1)
                             {
-                                // revisionGraphRevision.Parent.Children has more than one element
                                 brush = GetBrushForRevision(revisionGraphRevision.Child, revisionGraphRevision.Child.IsRelative);
                             }
                             else
@@ -290,15 +287,15 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                                 brush = GetBrushForRevision(revisionGraphRevision.Parent, revisionGraphRevision.Child.IsRelative);
                             }
 
+                            // EndLane
                             if (startLane >= 0 && centerLane >= 0 && (startLane <= MaxLanes || centerLane <= MaxLanes))
                             {
-                                // EndSegment
                                 DrawSegment(g, brush, startX, startY, centerX, centerY);
                             }
 
+                            // StartLane
                             if (endLane >= 0 && centerLane >= 0 && (endLane <= MaxLanes || centerLane <= MaxLanes))
                             {
-                                // StartSegment
                                 DrawSegment(g, brush, centerX, centerY, endX, endY);
                             }
                         }
@@ -306,10 +303,10 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                         if (currentRow.GetCurrentRevisionLane() < MaxLanes)
                         {
                             int centerX = g.RenderingOrigin.X + (int)((currentRow.GetCurrentRevisionLane() + 0.5) * LaneWidth);
-                            Rectangle nodeRect = new(centerX - (NodeDimension / 2), centerY - (NodeDimension / 2), NodeDimension, NodeDimension);
+                            Rectangle nodeRect = new Rectangle(centerX - (NodeDimension / 2), centerY - (NodeDimension / 2), NodeDimension, NodeDimension);
 
-                            bool square = currentRow.Revision.HasRef;
-                            bool hasOutline = currentRow.Revision.IsCheckedOut;
+                            var square = currentRow.Revision.HasRef;
+                            var hasOutline = currentRow.Revision.IsCheckedOut;
 
                             Brush brush = GetBrushForRevision(currentRow.Revision, currentRow.Revision.IsRelative);
                             if (square)
@@ -319,6 +316,8 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                             }
                             else //// Circle
                             {
+                                nodeRect.Width = nodeRect.Height = NodeDimension - 1;
+
                                 g.SmoothingMode = SmoothingMode.AntiAlias;
                                 g.FillEllipse(brush, nodeRect);
                             }
@@ -327,22 +326,31 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                             {
                                 nodeRect.Inflate(1, 1);
 
-                                Color outlineColor = SystemColors.WindowText;
+                                var outlineColor = Color.Black;
 
-                                using Pen pen = new(outlineColor, 2);
-                                if (square)
+                                using (var pen = new Pen(outlineColor, 2))
                                 {
-                                    g.SmoothingMode = SmoothingMode.None;
-                                    g.DrawRectangle(pen, nodeRect);
-                                }
-                                else //// Circle
-                                {
-                                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                                    g.DrawEllipse(pen, nodeRect);
+                                    if (square)
+                                    {
+                                        g.SmoothingMode = SmoothingMode.None;
+                                        g.DrawRectangle(pen, nodeRect);
+                                    }
+                                    else //// Circle
+                                    {
+                                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                                        g.DrawEllipse(pen, nodeRect);
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // Reset graphics options
+                    g.Clip = oldClip;
+
+                    g.SmoothingMode = oldSmoothingMode;
+
+                    return true;
                 }
             }
         }
@@ -362,9 +370,9 @@ namespace GitUI.UserControls.RevisionGrid.Columns
             return brush;
         }
 
-        private static int GetLaneForRow(IRevisionGraphRow? row, RevisionGraphSegment revisionGraphRevision)
+        private static int GetLaneForRow(RevisionGraphRow row, RevisionGraphSegment revisionGraphRevision)
         {
-            if (row is not null)
+            if (row != null)
             {
                 return row.GetLaneIndexForSegment(revisionGraphRevision);
             }
@@ -374,28 +382,33 @@ namespace GitUI.UserControls.RevisionGrid.Columns
 
         private void DrawSegment(Graphics g, Brush laneBrush, int x0, int y0, int x1, int y1)
         {
-            Point p0 = new(x0, y0);
-            Point p1 = new(x1, y1);
+            var p0 = new Point(x0, y0);
+            var p1 = new Point(x1, y1);
 
-            using Pen lanePen = new(laneBrush, LaneLineWidth);
-            if (x0 == x1)
+            using (var lanePen = new Pen(laneBrush, LaneLineWidth))
             {
-                g.SmoothingMode = SmoothingMode.None;
-                g.DrawLine(lanePen, p0, p1);
-            }
-            else
-            {
-                // Anti-aliasing with bezier & PixelOffsetMode.HighQuality
-                // introduces an offset of ~1/8 px - compensate it.
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                const float offset = -1f / 8f;
+                if (x0 == x1)
+                {
+                    g.SmoothingMode = SmoothingMode.None;
+                    g.DrawLine(lanePen, p0, p1);
+                }
+                else
+                {
+                    // Anti-aliasing seems to introduce an offset of two thirds
+                    // of a pixel to the right - compensate it.
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
 
-                float yMid = (y0 + y1) / 2f;
-                PointF c0 = new(offset + p0.X, offset + yMid);
-                PointF c1 = new(offset + p1.X, offset + yMid);
-                PointF e0 = new(offset + p0.X, offset + p0.Y);
-                PointF e1 = new(offset + p1.X, offset + p1.Y);
-                g.DrawBezier(lanePen, e0, c0, c1, e1);
+                    float offset = -0.667F;
+
+                    // Left shifting int is fast equivalent of dividing by two,
+                    // thus computing the average of y0 and y1.
+                    var yMid = (y0 + y1) >> 1;
+                    var c0 = new PointF(offset + x0, yMid - offset);
+                    var c1 = new PointF(offset + x1, yMid - offset);
+                    var e0 = new PointF(offset + p0.X, p0.Y + offset);
+                    var e1 = new PointF(offset + p1.X, p1.Y + offset);
+                    g.DrawBezier(lanePen, e0, c0, c1, e1);
+                }
             }
         }
 
@@ -449,13 +462,23 @@ namespace GitUI.UserControls.RevisionGrid.Columns
         private int CalculateGraphColumnWidth(in VisibleRowRange range, int currentWidth, int minimumWidth)
         {
             int laneCount = range.Select(index => _revisionGraph.GetSegmentsForRow(index))
-                                 .WhereNotNull()
+                                 .Where(laneRow => laneRow != null)
                                  .Select(laneRow => laneRow.GetLaneCount())
                                  .DefaultIfEmpty()
                                  .Max();
 
-            laneCount = Math.Min(laneCount, MaxLanes);
-            int columnWidth = (LaneWidth * laneCount) + ColumnLeftMargin;
+            // When 'git log --first-parent' filtration is enabled and when only current
+            // branch needed to be rendered (and this filter actually works),
+            // it is much more readable to limit max lanes to 1.
+            int maxLanes =
+                (AppSettings.ShowFirstParent &&
+                 AppSettings.ShowCurrentBranchOnly &&
+                 AppSettings.BranchFilterEnabled)
+                    ? 1
+                    : MaxLanes;
+
+            laneCount = Math.Min(laneCount, maxLanes);
+            var columnWidth = (LaneWidth * laneCount) + ColumnLeftMargin;
             if (columnWidth > minimumWidth)
             {
                 return columnWidth;
@@ -464,33 +487,56 @@ namespace GitUI.UserControls.RevisionGrid.Columns
             return minimumWidth + ColumnLeftMargin;
         }
 
-        public bool TryGetToolTip(DataGridViewCellMouseEventArgs e, GitRevision revision)
+        public override bool TryGetToolTip(DataGridViewCellMouseEventArgs e, GitRevision revision, out string toolTip)
         {
-            string? toolTip;
-            return TryGetToolTip(e, revision, out toolTip);
-        }
-
-        public override bool TryGetToolTip(DataGridViewCellMouseEventArgs e, GitRevision revision, [NotNullWhen(returnValue: true)] out string? toolTip)
-        {
-            if (e.X >= ColumnLeftMargin && LaneWidth >= 0 && e.RowIndex >= 0)
+            if (!revision.IsArtificial)
             {
-                int lane = (e.X - ColumnLeftMargin) / LaneWidth;
-                toolTip = _laneInfoProvider.GetLaneInfo(e.RowIndex, lane);
+                toolTip = GetLaneInfo(e.X - ColumnLeftMargin, e.RowIndex);
                 return true;
             }
 
             toolTip = default;
             return false;
+
+            string GetLaneInfo(int x, int rowIndex)
+            {
+                int lane = x / LaneWidth;
+                var laneInfoText = new StringBuilder();
+                RevisionGraphRow row = _revisionGraph.GetSegmentsForRow(rowIndex);
+                if (row != null)
+                {
+                    IEnumerable<RevisionGraphSegment> segmentsForLane = row.GetSegmentsForIndex(lane);
+
+                    if (segmentsForLane.Count() == 1)
+                    {
+                        // Crossing lange
+                        laneInfoText.Append(segmentsForLane.First().Parent.GitRevision.Body ?? segmentsForLane.First().Parent.GitRevision.Subject);
+                    }
+                    else
+                    if (segmentsForLane.Count() > 1)
+                    {
+                        // Current revision
+                        if (!row.Revision.Objectid.IsArtificial)
+                        {
+                            laneInfoText.AppendLine(row.Revision.Objectid.ToString());
+                            laneInfoText.AppendLine();
+                            laneInfoText.Append(row.Revision.GitRevision.Body ?? row.Revision.GitRevision.Subject);
+                        }
+                    }
+                }
+
+                return laneInfoText.ToString();
+            }
         }
     }
 
     public sealed class GraphCache
     {
-        private Bitmap? _graphBitmap;
-        private Graphics? _graphBitmapGraphics;
+        [CanBeNull] private Bitmap _graphBitmap;
+        [CanBeNull] private Graphics _graphBitmapGraphics;
 
-        public Bitmap? GraphBitmap => _graphBitmap;
-        public Graphics? GraphBitmapGraphics => _graphBitmapGraphics;
+        public Bitmap GraphBitmap => _graphBitmap;
+        public Graphics GraphBitmapGraphics => _graphBitmapGraphics;
 
         /// <summary>
         /// The 'slot' that is the head of the circular bitmap.
@@ -524,18 +570,18 @@ namespace GitUI.UserControls.RevisionGrid.Columns
 
         public void Allocate(int width, int height, int laneWidth)
         {
-            if (_graphBitmap is not null && _graphBitmap.Width >= width && _graphBitmap.Height == height)
+            if (_graphBitmap != null && _graphBitmap.Width >= width && _graphBitmap.Height == height)
             {
                 return;
             }
 
-            if (_graphBitmap is not null)
+            if (_graphBitmap != null)
             {
                 _graphBitmap.Dispose();
                 _graphBitmap = null;
             }
 
-            if (_graphBitmapGraphics is not null)
+            if (_graphBitmapGraphics != null)
             {
                 _graphBitmapGraphics.Dispose();
                 _graphBitmapGraphics = null;
@@ -547,11 +593,6 @@ namespace GitUI.UserControls.RevisionGrid.Columns
                 PixelFormat.Format32bppPArgb);
             _graphBitmapGraphics = Graphics.FromImage(_graphBitmap);
             _graphBitmapGraphics.SmoothingMode = SmoothingMode.AntiAlias;
-
-            // With SmoothingMode != None it is better to use PixelOffsetMode.HighQuality
-            // e.g. to avoid shrinking rectangles, ellipses and etc. by 1 px from right bottom
-            _graphBitmapGraphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-
             Head = 0;
             Count = 0;
         }
